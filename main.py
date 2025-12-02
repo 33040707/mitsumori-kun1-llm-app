@@ -6,20 +6,32 @@ import glob
 from pypdf import PdfReader
 from docx import Document
 from dotenv import load_dotenv
+# === OCR用ライブラリのインポート ===
+try:
+    import pytesseract
+    from pdf2image import convert_from_path
+    from PIL import Image
+    OCR_AVAILABLE = True
+    # 【重要】Tesseract-OCRをインストールした場所を指定してください
+    # 以下は標準的なインストール例です。ご自身の環境に合わせて変更が必要です。
+    # もしパスが通っていれば、この行はコメントアウトしても動く場合があります。
+    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+except ImportError:
+    OCR_AVAILABLE = False
+    print("OCRライブラリが見つかりません。pip install pytesseract pdf2image pillow を実行してください。")
 
 # --- 設定読み込み ---
 load_dotenv()
 API_KEY = os.getenv("OPENAI_API_KEY")
 
-# dataフォルダの設定
 current_dir = os.getcwd()
 DATA_FOLDER = os.path.join(current_dir, "data")
 
-# --- 関数定義：エラーハンドリング強化版 ---
+# --- 関数定義：OCR対応版 ---
 def extract_text_from_files(folder_path):
     combined_text = ""
     file_count = 0
-    debug_logs = []  # エラーログ用
+    debug_logs = []
 
     extensions = ['*.pdf', '*.docx', '*.xlsx']
     files = []
@@ -36,22 +48,58 @@ def extract_text_from_files(folder_path):
     for file_path in files:
         file_name = os.path.basename(file_path)
         try:
-            # 1. PDFの場合
+            # 1. PDFの場合（OCR対応処理）
             if file_path.endswith('.pdf'):
                 reader = PdfReader(file_path)
                 text = f"\n\n--- ファイル名: {file_name} (PDF) ---\n"
-                page_texts = []
-                for i, page in enumerate(reader.pages):
+                
+                # まずは通常のテキスト抽出を試みる
+                raw_text = ""
+                for page in reader.pages:
                     extracted = page.extract_text()
                     if extracted:
-                        page_texts.append(extracted)
-                    else:
-                        debug_logs.append(f"⚠️ {file_name} の {i+1}ページ目は文字が抽出できませんでした（画像PDFの可能性があります）。")
+                        raw_text += extracted + "\n"
                 
-                if not page_texts:
-                    text += "(このPDFからは文字情報を取得できませんでした)"
+                # テキストが極端に少ない(50文字未満)場合は、画像PDFとみなしてOCRを試みる
+                if len(raw_text.strip()) < 50:
+                    debug_logs.append(f"ℹ️ {file_name} はテキスト情報が少ないため、OCR処理を試みます。時間がかかります...")
+                    
+                    if OCR_AVAILABLE:
+                        try:
+                            # PDFを画像に変換 (Popplerが必要)
+                            # ※Popplerのパスが環境変数に通っていない場合、poppler_path引数での指定が必要になることがあります
+                            images = convert_from_path(file_path, dpi=300)
+                            ocr_result_text = ""
+                            
+                            progress_bar = st.progress(0)
+                            for i, img in enumerate(images):
+                                debug_logs.append(f"  - {i+1}/{len(images)}ページ目をOCR解析中...")
+                                # 画像から日本語(jpn)の文字を読み取る
+                                ocr_result_text += pytesseract.image_to_string(img, lang='jpn') + "\n"
+                                progress_bar.progress((i + 1) / len(images))
+                            progress_bar.empty()
+
+                            if ocr_result_text.strip():
+                                text += ocr_result_text
+                                debug_logs.append(f"✅ {file_name} のOCR解析に成功しました。")
+                            else:
+                                text += "(OCRを実行しましたが文字を認識できませんでした)\n" + raw_text
+                                debug_logs.append(f"⚠️ {file_name} のOCRを実行しましたが、有効な文字を認識できませんでした。")
+                        except Exception as e_ocr:
+                            text += "(OCR処理中にエラーが発生しました)\n" + raw_text
+                            err_msg = str(e_ocr).lower()
+                            if "tesseract is not installed" in err_msg or "found" in err_msg:
+                                debug_logs.append(f"❌ OCRエラー: Tesseractが見つかりません。パス設定を確認してください。\n詳細: {e_ocr}")
+                            elif "poppler" in err_msg:
+                                debug_logs.append(f"❌ OCRエラー: Popplerが見つかりません。インストールとパス設定を確認してください。\n詳細: {e_ocr}")
+                            else:
+                                debug_logs.append(f"❌ {file_name} のOCR処理エラー: {e_ocr}")
+                    else:
+                         text += "(OCRライブラリが不足しているため画像文字は読めません)\n" + raw_text
+                         debug_logs.append(f"⚠️ {file_name} は画像PDFの可能性がありますが、OCRライブラリが導入されていないためスキップします。")
                 else:
-                    text += "\n".join(page_texts)
+                    # 通常のテキスト抽出で十分な文字が取れた場合
+                    text += raw_text
                 
                 combined_text += text
                 file_count += 1
@@ -67,11 +115,9 @@ def extract_text_from_files(folder_path):
 
             # 3. Excelの場合
             elif file_path.endswith('.xlsx'):
-                # engine='openpyxl' を明示的に指定
                 xls = pd.read_excel(file_path, sheet_name=None, engine='openpyxl')
                 text = f"\n\n--- ファイル名: {file_name} (Excel) ---\n"
                 for sheet_name, df in xls.items():
-                    # NaN（空白）を空文字に置換して読みやすくする
                     df = df.fillna("")
                     text += f"Sheet: {sheet_name}\n"
                     text += df.to_markdown(index=False) + "\n"
@@ -79,20 +125,14 @@ def extract_text_from_files(folder_path):
                 file_count += 1
 
         except Exception as e:
-            error_msg = f"❌ 読込エラー: {file_name} - {str(e)}"
-            debug_logs.append(error_msg)
-            # Excel特有のエラーヒント
-            if "openpyxl" in str(e):
-                debug_logs.append("💡 ヒント: pip install openpyxl を実行してください。")
-            if "Permission denied" in str(e):
-                debug_logs.append("💡 ヒント: ファイルが開かれたままになっていませんか？閉じてから再試行してください。")
+            debug_logs.append(f"❌ 読込エラー: {file_name} - {str(e)}")
 
     return combined_text, file_count, debug_logs
 
 
 # --- アプリ本体 ---
-st.set_page_config(page_title="建設コンサル見積作成支援AI (Debug版)", layout="wide")
-st.title("🏗️ 建設コンサル見積作成支援システム (Debug Mode)")
+st.set_page_config(page_title="建設コンサル向け見積作成支援AI (OCR強化版)", layout="wide")
+st.title("🏗️ 建設コンサル見積作成支援システム (OCR強化版)")
 
 # --- サイドバー ---
 with st.sidebar:
@@ -107,80 +147,79 @@ with st.sidebar:
         st.success(f"✅ dataフォルダ: {len(files)}ファイル")
     else:
         st.error("🚫 dataフォルダが見つかりません")
+    
+    st.markdown("---")
+    st.markdown("### OCR機能ステータス")
+    if OCR_AVAILABLE:
+        st.success("✅ OCRライブラリ: 導入済み")
+        st.caption("※TesseractとPopplerの外部設定が必要です。")
+    else:
+        st.warning("⚠️ OCRライブラリ: 未導入")
+        st.caption("画像PDFは読めません。")
 
 # --- メインエリア ---
 st.subheader("1. 新規案件の条件入力")
 col1, col2 = st.columns(2)
 with col1:
-    project_name = st.text_input("案件名", value="テスト案件")
-    location = st.text_input("施工場所", value="テスト市")
+    project_name = st.text_input("案件名", value="〇〇地区道路改良工事")
+    location = st.text_input("施工場所", value="〇〇市地内")
 with col2:
     work_items = st.text_area("作業内容", height=100, placeholder="作業内容を入力...")
 
-# データ読み込みテストボタン（実行前に確認できるように分離）
+# データ確認ボタン
 st.subheader("2. 参照データの確認 (デバッグ用)")
 if st.button("フォルダ内のデータを読み込んで中身を確認する"):
-    with st.spinner('データ解析中...'):
+    with st.spinner('データ解析中 (OCR処理が入ると時間がかかります)...'):
         context_data, count, logs = extract_text_from_files(DATA_FOLDER)
         
-        # エラーログの表示
         if logs:
-            st.error("以下の問題が発生しました:")
+            st.write("--- 処理ログ ---")
             for log in logs:
-                st.write(log)
+                if "❌" in log: st.error(log)
+                elif "⚠️" in log: st.warning(log)
+                elif "ℹ️" in log: st.info(log)
+                else: st.success(log)
         
-        # 読み取れたテキストの表示
         st.info(f"{count} 件のファイルを読み込みました。")
         with st.expander("クリックしてAIに送られるテキスト全文を確認する"):
             st.text(context_data)
-            if len(context_data) < 100:
-                st.warning("⚠️ テキストが非常に少ないか、空です。PDFが画像（スキャン）データの可能性があります。")
 
 # 見積作成ボタン
 st.subheader("3. 見積作成実行")
 if st.button("見積案を作成する", type="primary"):
-    if not API_KEY:
-        st.error("APIキー設定を確認してください。")
+    if not API_KEY or not os.path.exists(DATA_FOLDER):
+        st.error("設定を確認してください。")
     else:
         openai.api_key = API_KEY
-        
-        # データ再読み込み
-        context_data, count, logs = extract_text_from_files(DATA_FOLDER)
-        
-        # 文字数制限を緩和 (10万文字まで)
-        if len(context_data) > 100000:
-            context_data = context_data[:100000] + "\n...(以下省略)..."
-            st.warning("⚠️ データ量が非常に多いため、一部を省略しました。")
-
-        system_prompt = """
-#役割
-あなたは建設コンサルタントの積算技術者です。
-過去の参照データに基づき、新規案件の見積書を作成してください。
-
-#最優先指示
-1. 【参照データ】の中に、類似の工種や単価がある場合は、**計算ルールよりも優先して**その単価を採用してください。
-2. 参照データにない項目のみ、後述の【積算ルール】に従って計算してください。
-
-#積算ルール
-（省略：ユーザーの指定した計算式・単価表）
-•   技術者単価: 令和7年度単価適用
-... (中略) ...
-        """
-
-        user_prompt = f"""
-        【案件名】: {project_name}
-        【場所】: {location}
-        【作業内容】:
-        {work_items}
-
-        【参照する社内過去データ (RAG)】:
-        {context_data}
-        """
-
-        with st.spinner('AIが計算中...'):
+        with st.spinner('データ読込＆AI計算中 (OCR処理が入ると数分かかる場合があります)...'):
+            # データ読み込み
+            context_data, count, logs = extract_text_from_files(DATA_FOLDER)
+            
+            # 文字数制限 (10万文字)
+            if len(context_data) > 100000:
+                context_data = context_data[:100000] + "\n...(以下省略)..."
+            
+            # プロンプト
+            system_prompt = """
+            あなたは建設コンサルタントのベテラン積算技術者です。
+            提供される【参照する社内過去データ】に基づき、新規案件の官公庁向け予算見積書案を作成してください。
+            
+            【最優先事項】
+            参照データ内に類似の工種、単価、歩掛がある場合は、必ずそれらを優先して採用し、適用した根拠（例：「○○工事のデータより採用」）を摘要欄に明記してください。
+            データが不鮮明な場合（OCRの誤認識など）は、文脈からベテランの知見で合理的な数値を推定・補正してください。
+            """
+            
+            user_prompt = f"""
+            【案件名】: {project_name}
+            【場所】: {location}
+            【作業内容】: {work_items}
+            【参照する社内過去データ (OCR処理済)】:
+            {context_data}
+            """
+            
             try:
                 response = openai.chat.completions.create(
-                    model="gpt-4o-mini", # または gpt-4o
+                    model="gpt-4o-mini",
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
