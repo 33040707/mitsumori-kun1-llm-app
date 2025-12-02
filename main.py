@@ -132,7 +132,7 @@ def extract_text_from_files(folder_path):
 
 # --- アプリ本体 ---
 st.set_page_config(page_title="建設コンサル向け見積作成支援AI (OCR強化版)", layout="wide")
-st.title("🏗️ 建設コンサル見積作成支援システム (OCR強化版)")
+st.title("🏗️ 建設コンサル見積作成支援システム ")
 
 # --- サイドバー ---
 with st.sidebar:
@@ -161,8 +161,8 @@ with st.sidebar:
 st.subheader("1. 新規案件の条件入力")
 col1, col2 = st.columns(2)
 with col1:
-    project_name = st.text_input("案件名", value="〇〇地区道路改良工事")
-    location = st.text_input("施工場所", value="〇〇市地内")
+    project_name = st.text_input("案件名", value="")
+    location = st.text_input("施工場所", value="")
 with col2:
     work_items = st.text_area("作業内容", height=100, placeholder="作業内容を入力...")
 
